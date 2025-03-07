@@ -23,7 +23,7 @@ class MediaFileFinisher:
     """媒体文件整理器类。"""
 
     IMAGE_SUFFIX_FILTER: Tuple = ('.jpg', '.jpeg', '.png')
-    VIDEO_SUFFIX_FILTER: Tuple = ('.mp4', '.mov', '.avi', '.dng')
+    VIDEO_SUFFIX_FILTER: Tuple = ('.mp4', '.mov', '.avi', '.dng', '.mp3', '.wmv', '.3gp')
 
     SUFFIX_FILTER: Tuple = IMAGE_SUFFIX_FILTER + VIDEO_SUFFIX_FILTER
 
@@ -102,6 +102,7 @@ class MediaFileFinisher:
         :param time_string: string
         :return: datetime object or None
         """
+
         datetime_formats = [
             '%Y-%m-%d %H:%M:%S',
             '%Y/%m/%d %H:%M:%S',
@@ -114,13 +115,15 @@ class MediaFileFinisher:
                 datetime_obj = datetime.strptime(time_string, datetime_format)
                 return datetime_obj
             except ValueError:
-                return None
+                continue  # 尝试下一个格式
 
-    def get_media_file_creation_time(self, src_media_file: Path) -> Optional[datetime]:
+        return None  # 所有格式都尝试失败后返回 None
+
+    def get_media_file_creation_time(self, src_media_file: Path) -> datetime:
         """
         获取媒体文件创建时间
         :param src_media_file: Path
-        :return: datetime or None
+        :return: datetime
         """
 
         media_file_metadata_dict = self.get_media_file_metadata(src_media_file)
@@ -155,36 +158,29 @@ class MediaFileFinisher:
         # 如果媒体文件Metadata数据获取成功
         if media_file_metadata_dict:
             # 尝试获取Metadata的"Date-time original"
-            media_file_creation_time_str = media_file_metadata_dict['Metadata'].get(
-                'Date-time original'
+            media_file_creation_time_str = (
+                media_file_metadata_dict.get('Metadata', {}).get('Date-time original') or
+                media_file_metadata_dict.get('Metadata', {}).get('Creation date')
             )
 
-            # 如上面获取失败，尝试获取Metadata的'Creation date'
             if not media_file_creation_time_str:
-                media_file_creation_time_str = media_file_metadata_dict['Metadata'].get(
-                    'Creation date'
+                logger.warning(
+                    f'媒体文件{str(src_media_file)}元数据没有"Date-time original"或"Creation date"属性'
                 )
-
-                # 如果尝试上面两种方式都获取失败，则以文件的mtime属性作为文件创建时间
-                if not media_file_creation_time_str:
-                    logger.warning(
-                        f'媒体文件{str(src_media_file)}元数据没有"Date-time original"或"Creation date"属性'
-                    )
-                    return self.get_media_file_mtime(src_media_file)
+                return self.get_media_file_mtime(src_media_file)
 
             # 解析通过媒体文件Metadata获取的时间字符串
             media_file_creation_time = self.parse_media_time_string(media_file_creation_time_str)
-
-            # 处理从个别手机APP导出的媒体文件Metadata数据严重不合理的情况，这里设置为早于2000年，则以文件的mtime属性作为文件创建时间
-            if media_file_creation_time.year < 2000:
-                return self.get_media_file_mtime(src_media_file)
-
-            # 如果通过Metadata获取到的文件创建时间字符串不符合指定格式，则以文件的mtime属性作为文件创建时间
             if not media_file_creation_time:
                 return self.get_media_file_mtime(src_media_file)
 
-            # 解析通过体文件Metadata获取的时间字符串解析成功
+            # 处理从个别手机APP导出的媒体文件Metadata数据严重不合理的情况
+            if media_file_creation_time.year < 2000:
+                return self.get_media_file_mtime(src_media_file)
+
             return media_file_creation_time
+
+        return self.get_media_file_mtime(src_media_file)
 
     @staticmethod
     def is_duplicated(file1: Path, file2: Path) -> bool:
@@ -209,8 +205,8 @@ class MediaFileFinisher:
     def rename_media_file(self,
                           src_media_file: Path,
                           stats_ns: Namespace,
-                          media_file_name_duplicated: List[str],
-                          media_file_duplicated_removed: List[str],
+                          media_file_name_duplicated: Any,
+                          media_file_duplicated_removed: Any,
                           lock: Any) -> None:
         """
         执行媒体文件重命名
@@ -223,11 +219,13 @@ class MediaFileFinisher:
         """
 
         media_file_creation_time = self.get_media_file_creation_time(src_media_file)
+        if media_file_creation_time is None:
+            media_file_creation_time = self.get_media_file_mtime(src_media_file)
 
-        # 获取媒体文件创建时间”年月日“字符串，用于构建目的目录名
+        # 获取媒体文件创建时间"年月日"字符串，用于构建目的目录名
         src_media_file_creation_date = datetime.strftime(media_file_creation_time, '%Y%m%d')
 
-        # 获取媒体文件创建时间的”年月日_时分秒“字符串，用于构建目的文件名
+        # 获取媒体文件创建时间的"年月日_时分秒"字符串，用于构建目的文件名
         src_media_file_creation_time = datetime.strftime(media_file_creation_time, '%Y%m%d_%H%M%S')
 
         # 获取媒体文件的后缀名
@@ -390,11 +388,12 @@ class MediaFileFinisher:
         # 创建进程池和共享变量
         process_nums = multiprocessing.cpu_count() - 1
         with multiprocessing.Manager() as manager:
-            stats_ns = manager.Namespace(media_file_nums=supported_src_media_file_nums,
-                                         image_file_nums=0,
-                                         video_file_nums=0,
-                                         media_file_name_duplicated_nums=0,
-                                         media_file_duplicated_removed_nums=0)
+            stats_ns = manager.Namespace()
+            stats_ns.media_file_nums = supported_src_media_file_nums
+            stats_ns.image_file_nums = 0
+            stats_ns.video_file_nums = 0
+            stats_ns.media_file_name_duplicated_nums = 0
+            stats_ns.media_file_duplicated_removed_nums = 0
             media_file_name_duplicated = manager.list()
             media_file_duplicated_removed = manager.list()
             lock = manager.Lock()
